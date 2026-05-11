@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 from PyQt6.QtCore import QEvent, QPointF, QTimer, Qt
-from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtGui import QFont, QMouseEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -155,6 +155,9 @@ class TrajectoryVisualizer(QMainWindow):
         self.anchor_labels = []
         self.play_index = 0
         self.selected_item = gl.GLScatterPlotItem(size=22, color=(0.1, 0.45, 1.0, 1.0))
+        self.velocity_arrow_length_m = 1.20
+        self.velocity_color_ref_mps = 5.0
+        self.velocity_label = None
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.advance_one_point)
@@ -280,10 +283,15 @@ class TrajectoryVisualizer(QMainWindow):
         self.start_item = gl.GLScatterPlotItem(size=22, color=(0.1, 0.9, 0.25, 1.0))
         self.ball_item = gl.GLScatterPlotItem(size=22, color=(1.0, 0.1, 0.1, 1.0))
         self.shadow_item = gl.GLScatterPlotItem(size=5, color=(0.55, 0.55, 0.55, 0.45))
+        self.velocity_arrow_item = gl.GLLinePlotItem(color=(0.1, 0.45, 1.0, 1.0), width=4)
+        self.velocity_arrow_head_a = gl.GLLinePlotItem(color=(0.1, 0.45, 1.0, 1.0), width=4)
+        self.velocity_arrow_head_b = gl.GLLinePlotItem(color=(0.1, 0.45, 1.0, 1.0), width=4)
 
         for item in [self.anchor_item, self.path_item, self.shadow_item, self.start_item, self.ball_item]:
             self.view.addItem(item)
         self.view.addItem(self.selected_item)
+        for item in [self.velocity_arrow_item, self.velocity_arrow_head_a, self.velocity_arrow_head_b]:
+            self.view.addItem(item)
         self.original_mouse_press_event = self.view.mousePressEvent
         self.original_mouse_move_event = self.view.mouseMoveEvent
         self.view.mousePressEvent = self.on_view_mouse_press
@@ -443,12 +451,12 @@ class TrajectoryVisualizer(QMainWindow):
         point = self.all_positions[all_index]
         pos = np.array([[point["x"], point["y"], point["z"]]], dtype=float)
         self.selected_item.setData(pos=pos)
-        visible_index = min(all_index, len(self.visible_positions) - 1)
-        speed = self.point_speed(visible_index) if visible_index >= 0 else 0.0
+        velocity = self.point_velocity(all_index)
+        self.update_velocity_arrow(point, velocity)
         self.status_label.setText(
             f"选中 idx={point['idx']} seq={point['seq']} | "
             f"x={point['x']:.3f}, y={point['y']:.3f}, z={point['z']:.3f} | "
-            f"v={speed:.3f} m/s | rms={point['rms']:.3f}m"
+            f"vx={velocity[0]:.3f}, vy={velocity[1]:.3f}, vz={velocity[2]:.3f} m/s | |v|={velocity[3]:.3f} m/s | rms={point['rms']:.3f}m"
         )
         self.select_table_index(point["idx"])
 
@@ -465,6 +473,7 @@ class TrajectoryVisualizer(QMainWindow):
     def load_all(self):
         self.anchors = read_anchor_positions(self.anchor_csv)
         self.all_positions = read_positions(self.position_csv)
+        self.update_velocity_color_reference()
         self.refresh_anchors()
         self.restart_playback()
 
@@ -487,9 +496,16 @@ class TrajectoryVisualizer(QMainWindow):
         for label in self.anchor_labels:
             self.view.removeItem(label)
         self.anchor_labels = []
+        anchor_font = QFont("Microsoft YaHei", 20)
+        anchor_font.setBold(True)
         for anchor in self.anchors:
             x, y, z = anchor["pos"]
-            label = gl.GLTextItem(pos=(x, y, z + 0.08), text=anchor["id"], color=(0.7, 0.9, 1.0, 1.0))
+            label = gl.GLTextItem(
+                pos=(x + 0.10, y + 0.10, z + 0.25),
+                text=anchor["id"],
+                color=(255, 245, 40, 255),
+                font=anchor_font,
+            )
             self.anchor_labels.append(label)
             self.view.addItem(label)
 
@@ -499,6 +515,7 @@ class TrajectoryVisualizer(QMainWindow):
             self.start_item.setData(pos=np.empty((0, 3)))
             self.ball_item.setData(pos=np.empty((0, 3)))
             self.shadow_item.setData(pos=np.empty((0, 3)))
+            self.clear_velocity_arrow()
             self.status_label.setText(f"等待播放 | 0 / {len(self.all_positions)} points")
             return
         pts = np.array([[p["x"], p["y"], p["z"]] for p in self.visible_positions], dtype=float)
@@ -525,6 +542,101 @@ class TrajectoryVisualizer(QMainWindow):
         dt = max(dt_ms / 1000.0, self.interval_box.value() / 1000.0, 1e-3)
         dist = ((b["x"] - a["x"]) ** 2 + (b["y"] - a["y"]) ** 2 + (b["z"] - a["z"]) ** 2) ** 0.5
         return dist / dt
+
+    def point_velocity(self, index):
+        if not self.all_positions or index < 0 or index >= len(self.all_positions):
+            return (0.0, 0.0, 0.0, 0.0)
+        if len(self.all_positions) == 1:
+            return (0.0, 0.0, 0.0, 0.0)
+
+        if index == 0:
+            a = self.all_positions[0]
+            b = self.all_positions[1]
+        elif index == len(self.all_positions) - 1:
+            a = self.all_positions[index - 1]
+            b = self.all_positions[index]
+        else:
+            a = self.all_positions[index - 1]
+            b = self.all_positions[index + 1]
+
+        dt_ms = b.get("pc_ms", 0) - a.get("pc_ms", 0)
+        dt = max(dt_ms / 1000.0, self.interval_box.value() / 1000.0, 1e-3)
+        vx = (b["x"] - a["x"]) / dt
+        vy = (b["y"] - a["y"]) / dt
+        vz = (b["z"] - a["z"]) / dt
+        speed = (vx * vx + vy * vy + vz * vz) ** 0.5
+        return (vx, vy, vz, speed)
+
+    def update_velocity_color_reference(self):
+        speeds = []
+        for index in range(len(self.all_positions)):
+            speed = self.point_velocity(index)[3]
+            if speed > 1e-6:
+                speeds.append(speed)
+        if speeds:
+            self.velocity_color_ref_mps = max(float(np.percentile(speeds, 90)), 0.5)
+        else:
+            self.velocity_color_ref_mps = 5.0
+
+    def velocity_color(self, speed):
+        t = min(max(speed / max(self.velocity_color_ref_mps, 1e-6), 0.0), 1.0)
+        deep = np.array([0.02, 0.12, 0.85, 1.0])
+        light = np.array([0.65, 0.92, 1.0, 1.0])
+        return tuple(deep + (light - deep) * t)
+
+    def clear_velocity_arrow(self):
+        empty = np.empty((0, 3), dtype=float)
+        self.velocity_arrow_item.setData(pos=empty)
+        self.velocity_arrow_head_a.setData(pos=empty)
+        self.velocity_arrow_head_b.setData(pos=empty)
+        if self.velocity_label is not None:
+            self.view.removeItem(self.velocity_label)
+            self.velocity_label = None
+
+    def update_velocity_arrow(self, point, velocity):
+        vx, vy, vz, speed = velocity
+        if speed <= 1e-6:
+            self.clear_velocity_arrow()
+            return
+
+        start = np.array([point["x"], point["y"], point["z"]], dtype=float)
+        direction = np.array([vx, vy, vz], dtype=float) / speed
+        length = self.velocity_arrow_length_m
+        end = start + direction * length
+        color = self.velocity_color(speed)
+
+        ref = np.array([0.0, 0.0, 1.0], dtype=float)
+        side = np.cross(direction, ref)
+        side_norm = np.linalg.norm(side)
+        if side_norm < 1e-6:
+            ref = np.array([0.0, 1.0, 0.0], dtype=float)
+            side = np.cross(direction, ref)
+            side_norm = np.linalg.norm(side)
+        side = side / max(side_norm, 1e-6)
+
+        head_len = min(max(length * 0.28, 0.06), 0.25)
+        head_width = head_len * 0.55
+        head_base = end - direction * head_len
+        head_a = head_base + side * head_width
+        head_b = head_base - side * head_width
+
+        self.velocity_arrow_item.setData(pos=np.vstack([start, end]), color=color)
+        self.velocity_arrow_head_a.setData(pos=np.vstack([end, head_a]), color=color)
+        self.velocity_arrow_head_b.setData(pos=np.vstack([end, head_b]), color=color)
+
+        if self.velocity_label is not None:
+            self.view.removeItem(self.velocity_label)
+        label_pos = end + np.array([0.08, 0.08, 0.08], dtype=float)
+        label_text = f"v={speed:.2f}m/s  vx={vx:.2f}, vy={vy:.2f}, vz={vz:.2f}"
+        speed_font = QFont("Microsoft YaHei", 14)
+        speed_font.setBold(True)
+        self.velocity_label = gl.GLTextItem(
+            pos=tuple(label_pos),
+            text=label_text,
+            color=(120, 220, 255, 255),
+            font=speed_font,
+        )
+        self.view.addItem(self.velocity_label)
 
     def nearest_visible_point(self, event_pos):
         if not self.visible_positions:
@@ -570,13 +682,14 @@ class TrajectoryVisualizer(QMainWindow):
         if index is None:
             return
         point = self.visible_positions[index]
-        speed = self.point_speed(index)
+        velocity = self.point_velocity(point["idx"])
         pos = np.array([[point["x"], point["y"], point["z"]]], dtype=float)
         self.selected_item.setData(pos=pos)
+        self.update_velocity_arrow(point, velocity)
         self.status_label.setText(
             f"选中 idx={point['idx']} seq={point['seq']} | "
             f"x={point['x']:.3f}, y={point['y']:.3f}, z={point['z']:.3f} | "
-            f"v={speed:.3f} m/s | rms={point['rms']:.3f}m"
+            f"vx={velocity[0]:.3f}, vy={velocity[1]:.3f}, vz={velocity[2]:.3f} m/s | |v|={velocity[3]:.3f} m/s | rms={point['rms']:.3f}m"
         )
         event.accept()
 
