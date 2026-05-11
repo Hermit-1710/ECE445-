@@ -1,0 +1,33 @@
+# Python/cache files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pip_tmp/
+
+# Editor metadata
+.vscode/
+
+# CMake/build outputs
+build/
+build-*/
+manual-build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+*.o
+*.obj
+*.d
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+~$*

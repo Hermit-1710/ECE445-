@@ -1,0 +1,6 @@
+PA4 作为SPI1的NSS label为DW_CS
+目前IRQ设置为下拉，正式接BU01的时候需要改为浮空
+
+
+
+DW100官网 https://www.qorvo.com/products/p/DW1000#documents
